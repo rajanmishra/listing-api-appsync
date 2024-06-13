@@ -3,6 +3,8 @@
 ## Ecommerce Service (product and category) Deployment Guide
 This guide provides steps to deploy and run the Ecommerce Service using the Serverless Framework with AWS AppSync.
 
+Demo - https://www.loom.com/share/d15d2c995ba24f95804f3360c86c3cf1?sid=59fcf7e1-1c43-4e8a-89a7-aba196fadf59
+
 ## Prerequisites
 Node.js installed (version 18.x or higher)
 
