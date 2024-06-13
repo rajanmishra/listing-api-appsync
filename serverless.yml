@@ -140,7 +140,7 @@ resources:
           type Query {
             getProduct(productId: ID!): Product
             listProducts(limit: Int, nextToken: String): ProductConnection
-            getTaxonomy(TaxonomyId: ID!): Taxonomy
+            getTaxonomy(taxonomyId: ID!): Taxonomy
             listTaxonomies(limit: Int, nextToken: String): TaxonomyConnection
           }
 
