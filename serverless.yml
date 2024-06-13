@@ -1,0 +1,536 @@
+# "org" ensures this Service is used with the correct Serverless Framework Access Key.
+org: testrajan
+# "app" enables Serverless Framework Dashboard features and sharing them with other Services.
+app: ecommerce-service
+service: ecommerce-service
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-2
+  apiGateway:
+    apiKeys:
+      - api-key-ecommerce-service-lambda # This can be dynamic using the env information
+    usagePlan:
+      quota:
+        limit: 5000
+        offset: 2
+        period: MONTH
+      throttle:
+        burstLimit: 200
+        rateLimit: 100
+
+functions:
+  app:
+    handler: handler.handler
+    events:
+      - http:
+          path: /
+          method: any
+          private: true
+      - http:
+          path: /{proxy+}
+          method: any
+          private: true
+
+resources:
+  Resources:  
+    AppSyncDynamoDBRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: "AppSyncDynamoDBRole"
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: appsync.amazonaws.com
+              Action: sts:AssumeRole
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole      
+        Policies:
+          - PolicyName: AppSyncDynamoDBPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                  - dynamodb:*
+                  Resource:
+                    - arn:aws:dynamodb:us-east-2:*:table/Products
+                    - arn:aws:dynamodb:us-east-2:*:table/ProductTaxonomyAttributes
+                    - arn:aws:dynamodb:us-east-2:*:table/ProductTaxonomyAttributes/index/*
+
+    ProductsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: Products
+        AttributeDefinitions:
+          - AttributeName: productId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: productId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+
+    ProductTaxonomyAttributesTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ProductTaxonomyAttributes
+        AttributeDefinitions:
+          - AttributeName: taxonomyId
+            AttributeType: S
+          - AttributeName: parentId
+            AttributeType: S
+          - AttributeName: name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: taxonomyId
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+        GlobalSecondaryIndexes:
+          - IndexName: ParentIndex
+            KeySchema:
+              - AttributeName: parentId
+                KeyType: HASH
+              - AttributeName: name
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+            ProvisionedThroughput:
+              ReadCapacityUnits: 5
+              WriteCapacityUnits: 5  
+
+    AppSyncApi:
+      Type: AWS::AppSync::GraphQLApi
+      Properties:
+        Name: ProductApi
+        AuthenticationType: API_KEY
+
+    AppSyncSchema:
+      Type: AWS::AppSync::GraphQLSchema
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        Definition: |
+          type Product {
+            productId: ID!
+            name: String!
+            description: String
+            price: Float!
+            category: String
+            stock: Int
+            createdAt: String
+            updatedAt: String
+          }
+
+          type Taxonomy {
+            taxonomyId: ID!
+            name: String!
+            description: String
+            parentId: String
+            type: String!
+          }
+
+          type Query {
+            getProduct(productId: ID!): Product
+            listProducts(limit: Int, nextToken: String): ProductConnection
+            getTaxonomy(TaxonomyId: ID!): Taxonomy
+            listTaxonomies(limit: Int, nextToken: String): TaxonomyConnection
+          }
+
+          type Mutation {
+            createProduct(name: String!, description: String, price: Float, category: String, stock: Int): Product
+            updateProduct(productId: ID!, name: String, description: String, price: Float, category: String, stock: Int): Product
+            deleteProduct(productId: ID!): Product
+            createTaxonomy(name: String!, description: String, parentId: String!, type: String): Taxonomy
+            updateTaxonomy(taxonomyId: ID!, name: String, description: String, parentId: String, type: String): Taxonomy
+            deleteTaxonomy(taxonomyId: ID!): Taxonomy
+          }
+
+          type ProductConnection {
+            items: [Product]
+            nextToken: String
+          }
+
+          type TaxonomyConnection {
+            items: [Taxonomy]
+            nextToken: String
+          }
+
+          schema {
+            query: Query
+            mutation: Mutation
+          }
+
+    AppSyncApiKey:
+      Type: AWS::AppSync::ApiKey
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        Description: "API Key for ProductApi"
+        Expires: 1719192472 # Unix Epoch time for a distant future expiration
+
+    AppSyncDatasourceProducts:
+        Type: AWS::AppSync::DataSource
+        Properties:
+          ApiId: !GetAtt AppSyncApi.ApiId
+          Name: Products
+          Type: AMAZON_DYNAMODB
+          DynamoDBConfig:
+            TableName: Products
+            AwsRegion: !Ref AWS::Region
+          ServiceRoleArn:
+            Fn::GetAtt:
+              - AppSyncDynamoDBRole
+              - Arn
+
+    AppSyncDatasourceProductTaxonomyAttributes:
+      Type: AWS::AppSync::DataSource
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        Name: ProductTaxonomyAttributes
+        Type: AMAZON_DYNAMODB
+        DynamoDBConfig:
+          TableName: ProductTaxonomyAttributes
+          AwsRegion: !Ref AWS::Region
+        ServiceRoleArn:
+          Fn::GetAtt:
+            - AppSyncDynamoDBRole
+            - Arn             
+
+    GetProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Query
+        FieldName: getProduct
+        DataSourceName: Products
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "GetItem",
+            "key": {
+              "productId": { "S": "$ctx.args.productId" }
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProducts
+        - AppSyncSchema        
+
+    ListProductsResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Query
+        FieldName: listProducts
+        DataSourceName: Products
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "Scan",
+            "limit": $util.defaultIfNull($ctx.args.limit, 10),
+            "nextToken": $util.toJson($ctx.args.nextToken)
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProducts
+        - AppSyncSchema      
+
+    CreateProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: createProduct
+        DataSourceName: Products
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "PutItem",
+            "key": {
+              "productId":  $util.dynamodb.toDynamoDBJson($util.autoId())
+            },
+            "attributeValues": {
+              "name": $util.dynamodb.toDynamoDBJson($ctx.args.name),
+              "description": $util.dynamodb.toDynamoDBJson($ctx.args.description),
+              "price": $util.dynamodb.toDynamoDBJson($ctx.args.price),
+              "category": $util.dynamodb.toDynamoDBJson($ctx.args.category),
+              "stock": $util.dynamodb.toDynamoDBJson($ctx.args.stock),
+              "createdAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601()),
+              "updatedAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProducts
+        - AppSyncSchema  
+
+    UpdateProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: updateProduct
+        DataSourceName: Products
+        RequestMappingTemplate: |
+          #set($updateExpression = "SET #updatedAt = :updatedAt")
+          #set($expressionNames = {"#updatedAt": "updatedAt"})
+          #set($expressionValues = {":updatedAt": $util.dynamodb.toDynamoDB($util.time.nowISO8601())})
+
+          #if( $ctx.args.name )
+            #set($updateExpression = "$updateExpression, #name = :name")
+            $util.qr($expressionNames.put("#name", "name"))
+            $util.qr($expressionValues.put(":name", $util.dynamodb.toDynamoDB($ctx.args.name)))
+          #end
+          #if( $ctx.args.description )
+            #set($updateExpression = "$updateExpression, #description = :description")
+            $util.qr($expressionNames.put("#description", "description"))
+            $util.qr($expressionValues.put(":description", $util.dynamodb.toDynamoDB($ctx.args.description)))
+          #end
+          #if( $ctx.args.price )
+            #set($updateExpression = "$updateExpression, #price = :price")
+            $util.qr($expressionNames.put("#price", "price"))
+            $util.qr($expressionValues.put(":price", $util.dynamodb.toDynamoDB($ctx.args.price)))
+          #end
+          #if( $ctx.args.category )
+            #set($updateExpression = "$updateExpression, #category = :category")
+            $util.qr($expressionNames.put("#category", "category"))
+            $util.qr($expressionValues.put(":category", $util.dynamodb.toDynamoDB($ctx.args.category)))
+          #end
+          #if( $ctx.args.stock )
+            #set($updateExpression = "$updateExpression, #stock = :stock")
+            $util.qr($expressionNames.put("#stock", "stock"))
+            $util.qr($expressionValues.put(":stock", $util.dynamodb.toDynamoDB($ctx.args.stock)))
+          #end
+          {
+            "version": "2017-02-28",
+            "operation": "UpdateItem",
+            "key": {
+              "productId": $util.dynamodb.toDynamoDBJson($ctx.args.productId)
+            },
+            "update": {
+                "expression": "$updateExpression",
+                "expressionNames": $util.toJson($expressionNames),
+                "expressionValues": $util.toJson($expressionValues)
+            },
+            "condition": {
+              "expression": "attribute_exists(productId)"
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProducts
+        - AppSyncSchema   
+
+    DeleteProductResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: deleteProduct
+        DataSourceName: Products
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "DeleteItem",
+            "key": {
+              "productId": $util.dynamodb.toDynamoDBJson($ctx.args.productId)
+            },
+            "condition": {
+              "expression": "attribute_exists(productId)"
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProducts
+        - AppSyncSchema   
+
+    DeleteTaxonomyResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: deleteTaxonomy
+        DataSourceName: ProductTaxonomyAttributes
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "DeleteItem",
+            "key": {
+              "taxonomyId": $util.dynamodb.toDynamoDBJson($ctx.args.taxonomyId)
+            },
+            "condition": {
+              "expression": "attribute_exists(taxonomyId)"
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProductTaxonomyAttributes
+        - AppSyncSchema            
+
+    GetTaxonomyResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Query
+        FieldName: getTaxonomy
+        DataSourceName: ProductTaxonomyAttributes
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "GetItem",
+            "key": {
+              "taxonomyId": { "S": "$ctx.args.taxonomyId" }
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProductTaxonomyAttributes
+        - AppSyncSchema  
+
+    ListTaxonomiesResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Query
+        FieldName: listTaxonomies
+        DataSourceName: ProductTaxonomyAttributes
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "Scan",
+            "limit": $util.defaultIfNull($ctx.args.limit, 10),
+            "nextToken": $util.toJson($ctx.args.nextToken)
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)  
+      DependsOn:
+        - AppSyncDatasourceProductTaxonomyAttributes
+        - AppSyncSchema  
+          
+    CreateTaxonomyResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: createTaxonomy
+        DataSourceName: ProductTaxonomyAttributes
+        RequestMappingTemplate: |
+          {
+            "version": "2017-02-28",
+            "operation": "PutItem",
+            "key": {
+              "taxonomyId":  $util.dynamodb.toDynamoDBJson($util.autoId())
+            },
+            "attributeValues": {
+              "name": $util.dynamodb.toDynamoDBJson($ctx.args.name),
+              "description": $util.dynamodb.toDynamoDBJson($ctx.args.description),
+              "parentId":  $util.dynamodb.toDynamoDBJson($ctx.args.parentId),
+              "type": $util.dynamodb.toDynamoDBJson($ctx.args.type), 
+              "createdAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601()),
+              "updatedAt": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601())
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProductTaxonomyAttributes
+        - AppSyncSchema     
+
+    UpdateTaxonomyResolver:
+      Type: AWS::AppSync::Resolver
+      Properties:
+        ApiId: !GetAtt AppSyncApi.ApiId
+        TypeName: Mutation
+        FieldName: updateTaxonomy
+        DataSourceName: ProductTaxonomyAttributes
+        RequestMappingTemplate: |
+          #set($updateExpression = "SET #updatedAt = :updatedAt")
+          #set($expressionNames = {"#updatedAt": "updatedAt"})
+          #set($expressionValues = {":updatedAt": $util.dynamodb.toDynamoDB($util.time.nowISO8601())})
+
+          #if( $ctx.args.name )
+            #set($updateExpression = "$updateExpression, #name = :name")
+            $util.qr($expressionNames.put("#name", "name"))
+            $util.qr($expressionValues.put(":name", $util.dynamodb.toDynamoDB($ctx.args.name)))
+          #end
+          #if( $ctx.args.description )
+            #set($updateExpression = "$updateExpression, #description = :description")
+            $util.qr($expressionNames.put("#description", "description"))
+            $util.qr($expressionValues.put(":description", $util.dynamodb.toDynamoDB($ctx.args.description)))
+          #end
+          #if( $ctx.args.parentId )
+            #set($updateExpression = "$updateExpression, #parentId = :parentId")
+            $util.qr($expressionNames.put("#parentId", "parentId"))
+            $util.qr($expressionValues.put(":parentId", $util.dynamodb.toDynamoDB($ctx.args.parentId)))
+          #end
+          #if( $ctx.args.type )
+            #set($updateExpression = "$updateExpression, #type = :type")
+            $util.qr($expressionNames.put("#type", "type"))
+            $util.qr($expressionValues.put(":type", $util.dynamodb.toDynamoDB($ctx.args.type)))
+          #end
+          {
+            "version": "2017-02-28",
+            "operation": "UpdateItem",
+            "key": {
+               "taxonomyId": $util.dynamodb.toDynamoDBJson($ctx.args.taxonomyId)
+           },
+           "update": {
+              "expression": "$updateExpression",
+              "expressionNames": $util.toJson($expressionNames),
+              "expressionValues": $util.toJson($expressionValues)
+            },
+            "condition": {
+              "expression": "attribute_exists(taxonomyId)"
+            }
+          }
+        ResponseMappingTemplate: |
+          $util.toJson($ctx.result)
+      DependsOn:
+        - AppSyncDatasourceProductTaxonomyAttributes
+        - AppSyncSchema     
+
+
+  Outputs:
+    ProductsTableArn:
+      Value:
+        Ref: ProductsTable
+    ProductTaxonomyAttributesTableArn:
+      Value:
+        Ref: ProductTaxonomyAttributesTable
+    AppSyncApiUrl:
+      Description: "URL of the AppSync API"
+      Value: 
+        Fn::GetAtt:
+          - AppSyncApi
+          - GraphQLUrl    
+    AppSyncApiKey:
+      Description: "AppSync API Key"
+      Value: !GetAtt AppSyncApiKey.ApiKey       
+    AppSyncApiId:
+      Value:
+        Fn::GetAtt:
+          - AppSyncApi
+          - ApiId
+
+plugins:
+  - serverless-pseudo-parameters
+
+custom:
+  pipeline:
+    stages:
+      - name: dev # This can be dynamic ${file(env.yml):stage}  export ENV=dev serverless deploy --env $ENV
+        manualApproval: true
